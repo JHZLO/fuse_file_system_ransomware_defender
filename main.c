@@ -12,20 +12,15 @@
 #include <limits.h>
 #include <sys/time.h>
 #include <time.h>
-
-static int base_fd = -1;
+#include <pthread.h>
+#include <math.h>
 
 // 읽기 전용 확장자 설정
 #define READ_ONLY_EXTENSIONS ".mp3", ".pdf"
 #define MAX_WRITE_SIZE 1048576 // 1MB
 #define MAX_WRITE_COUNT 50
 #define TIME_WINDOW 60
-// trace last_write_time and write_count
-static time_t last_write_time = 0;
-static int write_count = 0;
-
-#include <pthread.h>
-#include <math.h>
+#define MAX_FILES 100
 
 // 파일 엔트로피 저장을 위한 구조체 및 배열
 typedef struct {
@@ -33,7 +28,10 @@ typedef struct {
     double entropy;
 } FileEntropy;
 
-#define MAX_FILES 100
+static int base_fd = -1;
+// trace last_write_time and write_count
+static time_t last_write_time = 0;
+static int write_count = 0;
 static FileEntropy file_entropy_log[MAX_FILES];
 static int entropy_log_index = 0;
 pthread_mutex_t entropy_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -83,13 +81,13 @@ static double calculate_entropy(const char *data, size_t size) {
 
     int counts[256] = {0};
     for (size_t i = 0; i < size; i++) {
-        counts[(unsigned char)data[i]]++;
+        counts[(unsigned char) data[i]]++;
     }
 
     double entropy = 0.0;
     for (int i = 0; i < 256; i++) {
         if (counts[i] > 0) {
-            double p = (double)counts[i] / size;
+            double p = (double) counts[i] / size;
             entropy -= p * log2(p);
         }
     }
@@ -97,25 +95,26 @@ static double calculate_entropy(const char *data, size_t size) {
 }
 
 static int detect_ransomware_activity(size_t size) {
-	time_t current_time;
-	time(&current_time);
+    time_t current_time;
+    time(&current_time);
 
-	if (current_time - last_write_time <= TIME_WINDOW) {
-		write_count++;
-		if(write_count > MAX_WRITE_COUNT) {
-			return 1; // too many write_count
-		}
-	} else {
-		write_count = 1; // after few minute
-	}
+    if (current_time - last_write_time <= TIME_WINDOW) {
+        write_count++;
+        if (write_count > MAX_WRITE_COUNT) {
+            return 1; // too many write_count
+        }
+    } else {
+        write_count = 1; // after few minute
+    }
 
-	if (size > MAX_WRITE_SIZE) {
-		return 1;  // too big size
-	}
+    if (size > MAX_WRITE_SIZE) {
+        return 1;  // too big size
+    }
 
-	last_write_time = current_time;
-	return 0; // normal write
+    last_write_time = current_time;
+    return 0; // normal write
 }
+
 // 파일 백업 이름 생성 함수
 static void create_backup_filename(const char *path, char *backup_path) {
     time_t rawtime;
@@ -229,8 +228,8 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
 
     // 비정상적인 쓰기 작업 감지 (예: 크기나 빈도가 과도하게 많을 경우)
     if (detect_ransomware_activity(size)) {
-	printf("Suspicious write activity detected!\n");
-	return -EIO;  // unnormal write deny
+        printf("Suspicious write activity detected!\n");
+        return -EIO;  // unnormal write deny
     }
     // 다른 파일의 경우 백업 파일을 만들고, 쓰기를 처리
     if (create_backup(path) == 0) {
@@ -311,7 +310,7 @@ static int myfs_rename(const char *from, const char *to, unsigned int flags) {
     }
     // unnormal name change
     if (strstr(to, ".conti") != NULL) {
-	return -EIO;
+        return -EIO;
     }
     res = renameat(base_fd, relfrom, base_fd, relto);
     if (res == -1)
@@ -340,14 +339,14 @@ static int myfs_utimens(const char *path, const struct timespec tv[2],
 
 // 파일시스템 연산자 구조체
 static const struct fuse_operations myfs2_oper = {
-    .getattr    = myfs_getattr,
-    .write      = myfs_write,
-    .release    = myfs_release,
-    .unlink     = myfs_unlink,
-    .mkdir      = myfs_mkdir,
-    .rmdir      = myfs_rmdir,
-    .rename     = myfs_rename,
-    .utimens    = myfs_utimens,
+        .getattr    = myfs_getattr,
+        .write      = myfs_write,
+        .release    = myfs_release,
+        .unlink     = myfs_unlink,
+        .mkdir      = myfs_mkdir,
+        .rmdir      = myfs_rmdir,
+        .rename     = myfs_rename,
+        .utimens    = myfs_utimens,
 };
 
 int main(int argc, char *argv[]) {

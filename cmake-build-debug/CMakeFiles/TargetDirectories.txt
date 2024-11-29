@@ -1,0 +1,3 @@
+C:/Users/kjh01/Desktop/산업보안학과/3학년 2학기/시스템 보안/시스템보안_조별과제/fuse_file_system_ransomware_defender/cmake-build-debug/CMakeFiles/fuse_file_system_ransomware_defender.dir
+C:/Users/kjh01/Desktop/산업보안학과/3학년 2학기/시스템 보안/시스템보안_조별과제/fuse_file_system_ransomware_defender/cmake-build-debug/CMakeFiles/edit_cache.dir
+C:/Users/kjh01/Desktop/산업보안학과/3학년 2학기/시스템 보안/시스템보안_조별과제/fuse_file_system_ransomware_defender/cmake-build-debug/CMakeFiles/rebuild_cache.dir

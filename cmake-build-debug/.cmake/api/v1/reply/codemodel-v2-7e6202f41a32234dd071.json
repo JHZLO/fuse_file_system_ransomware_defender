@@ -1,0 +1,60 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-Debug-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.24"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "fuse_file_system_ransomware_defender",
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "fuse_file_system_ransomware_defender::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fuse_file_system_ransomware_defender-Debug-10a073cfd4ba4fdab8b3.json",
+					"name" : "fuse_file_system_ransomware_defender",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "C:/Users/kjh01/Desktop/\uc0b0\uc5c5\ubcf4\uc548\ud559\uacfc/3\ud559\ub144 2\ud559\uae30/\uc2dc\uc2a4\ud15c \ubcf4\uc548/\uc2dc\uc2a4\ud15c\ubcf4\uc548_\uc870\ubcc4\uacfc\uc81c/fuse_file_system_ransomware_defender/cmake-build-debug",
+		"source" : "C:/Users/kjh01/Desktop/\uc0b0\uc5c5\ubcf4\uc548\ud559\uacfc/3\ud559\ub144 2\ud559\uae30/\uc2dc\uc2a4\ud15c \ubcf4\uc548/\uc2dc\uc2a4\ud15c\ubcf4\uc548_\uc870\ubcc4\uacfc\uc81c/fuse_file_system_ransomware_defender"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 4
+	}
+}

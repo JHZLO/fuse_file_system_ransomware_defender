@@ -24,6 +24,78 @@ static int base_fd = -1;
 static time_t last_write_time = 0;
 static int write_count = 0;
 
+#include <pthread.h>
+#include <math.h>
+
+// 파일 엔트로피 저장을 위한 구조체 및 배열
+typedef struct {
+    char path[PATH_MAX];
+    double entropy;
+} FileEntropy;
+
+#define MAX_FILES 100
+static FileEntropy file_entropy_log[MAX_FILES];
+static int entropy_log_index = 0;
+pthread_mutex_t entropy_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// 파일 엔트로피 저장
+void log_file_entropy(const char *path, double entropy) {
+    pthread_mutex_lock(&entropy_lock);
+    int found = 0;
+    for (int i = 0; i < entropy_log_index; i++) {
+        if (strcmp(file_entropy_log[i].path, path) == 0) {
+            file_entropy_log[i].entropy = entropy;
+            found = 1;
+            break;
+        }
+    }
+    if (!found && entropy_log_index < MAX_FILES) {
+        strncpy(file_entropy_log[entropy_log_index].path, path, PATH_MAX);
+        file_entropy_log[entropy_log_index].entropy = entropy;
+        entropy_log_index++;
+    }
+    pthread_mutex_unlock(&entropy_lock);
+}
+
+// 이전 엔트로피 가져오기
+double get_previous_entropy(const char *path) {
+    pthread_mutex_lock(&entropy_lock);
+    for (int i = 0; i < entropy_log_index; i++) {
+        if (strcmp(file_entropy_log[i].path, path) == 0) {
+            pthread_mutex_unlock(&entropy_lock);
+            return file_entropy_log[i].entropy;
+        }
+    }
+    pthread_mutex_unlock(&entropy_lock);
+    return -1.0; // 이전 기록이 없으면 -1 반환
+}
+
+// 엔트로피 차이를 통해 암호화 의심 탐지
+int detect_entropy_increase(const char *path, double new_entropy, double threshold) {
+    double previous_entropy = get_previous_entropy(path);
+    if (previous_entropy < 0) return 0; // 이전 엔트로피 기록 없음
+    return (new_entropy - previous_entropy) > threshold;
+}
+
+// 엔트로피 계산 함수
+static double calculate_entropy(const char *data, size_t size) {
+    if (size == 0) return 0.0;
+
+    int counts[256] = {0};
+    for (size_t i = 0; i < size; i++) {
+        counts[(unsigned char)data[i]]++;
+    }
+
+    double entropy = 0.0;
+    for (int i = 0; i < 256; i++) {
+        if (counts[i] > 0) {
+            double p = (double)counts[i] / size;
+            entropy -= p * log2(p);
+        }
+    }
+    return entropy;
+}
+
 static int detect_ransomware_activity(size_t size) {
 	time_t current_time;
 	time(&current_time);
@@ -142,6 +214,18 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
     if (is_read_only(relpath)) {
         return -EACCES;
     }
+
+    // 새로운 엔트로피 계산
+    double new_entropy = calculate_entropy(buf, size);
+
+    // 엔트로피 증가 탐지 (임계값 설정: 1.0)
+    if (detect_entropy_increase(path, new_entropy, 1.0)) {
+        fprintf(stderr, "Entropy increase detected in file: %s\n", path);
+        return -EACCES; // 작업 차단
+    }
+
+    // 엔트로피 기록 업데이트
+    log_file_entropy(path, new_entropy);
 
     // 비정상적인 쓰기 작업 감지 (예: 크기나 빈도가 과도하게 많을 경우)
     if (detect_ransomware_activity(size)) {

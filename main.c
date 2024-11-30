@@ -271,4 +271,54 @@ static int myfs_utimens(const char *path, const struct timespec tv[2],
     if (fi != NULL && fi->fh != 0) {
         res = futimens(fi->fh, tv);
     } else {
-        res = utimensat(base_fd
+        res = utimensat(base_fd, relpath, tv, 0);
+    }
+    if (res == -1)
+        return -errno;
+
+    return 0;
+}
+
+// 파일시스템 연산자 구조체
+static const struct fuse_operations myfs2_oper = {
+        .getattr    = myfs_getattr,
+        .write      = myfs_write,
+        .release    = myfs_release,
+        .unlink     = myfs_unlink,
+        .mkdir      = myfs_mkdir,
+        .rmdir      = myfs_rmdir,
+        .rename     = myfs_rename,
+        .utimens    = myfs_utimens,
+};
+
+int main(int argc, char *argv[]) {
+    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <mountpoint>\n", argv[0]);
+        return -1;
+    }
+
+    // 마운트 포인트 경로를 저장
+    char *mountpoint = realpath(argv[argc - 1], NULL);
+    if (mountpoint == NULL) {
+        perror("realpath");
+        return -1;
+    }
+
+    // 마운트하기 전에 마운트 포인트 디렉터리를 엽니다.
+    base_fd = open(mountpoint, O_RDONLY | O_DIRECTORY);
+    if (base_fd == -1) {
+        perror("open");
+        free(mountpoint);
+        return -1;
+    }
+
+    free(mountpoint);
+
+    // FUSE 파일시스템 실행
+    int ret = fuse_main(args.argc, args.argv, &myfs2_oper, NULL);
+
+    close(base_fd);
+    return ret;
+}

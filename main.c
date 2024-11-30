@@ -11,7 +11,6 @@
 #include <dirent.h>
 #include <limits.h>
 #include <sys/time.h>
-#include <time.h>
 #include <pthread.h>
 #include <math.h>
 
@@ -29,12 +28,30 @@ typedef struct {
 } FileEntropy;
 
 static int base_fd = -1;
-// trace last_write_time and write_count
 static time_t last_write_time = 0;
 static int write_count = 0;
 static FileEntropy file_entropy_log[MAX_FILES];
 static int entropy_log_index = 0;
 pthread_mutex_t entropy_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// 엔트로피 계산 함수
+static double calculate_entropy(const char *data, size_t size) {
+    if (size == 0) return 0.0;
+
+    int counts[256] = {0};
+    for (size_t i = 0; i < size; i++) {
+        counts[(unsigned char)data[i]]++;
+    }
+
+    double entropy = 0.0;
+    for (int i = 0; i < 256; i++) {
+        if (counts[i] > 0) {
+            double p = (double)counts[i] / size;
+            entropy -= p * log2(p);
+        }
+    }
+    return entropy;
+}
 
 // 파일 엔트로피 저장
 void log_file_entropy(const char *path, double entropy) {
@@ -65,35 +82,10 @@ double get_previous_entropy(const char *path) {
         }
     }
     pthread_mutex_unlock(&entropy_lock);
-    return -1.0; // 이전 기록이 없으면 -1 반환
+    return -1.0; // 이전 기록 없음
 }
 
-// 엔트로피 차이를 통해 암호화 의심 탐지
-int detect_entropy_increase(const char *path, double new_entropy, double threshold) {
-    double previous_entropy = get_previous_entropy(path);
-    if (previous_entropy < 0) return 0; // 이전 엔트로피 기록 없음
-    return (new_entropy - previous_entropy) > threshold;
-}
-
-// 엔트로피 계산 함수
-static double calculate_entropy(const char *data, size_t size) {
-    if (size == 0) return 0.0;
-
-    int counts[256] = {0};
-    for (size_t i = 0; i < size; i++) {
-        counts[(unsigned char) data[i]]++;
-    }
-
-    double entropy = 0.0;
-    for (int i = 0; i < 256; i++) {
-        if (counts[i] > 0) {
-            double p = (double) counts[i] / size;
-            entropy -= p * log2(p);
-        }
-    }
-    return entropy;
-}
-
+// ransomware 의심 활동 감지
 static int detect_ransomware_activity(size_t size) {
     time_t current_time;
     time(&current_time);
@@ -101,31 +93,30 @@ static int detect_ransomware_activity(size_t size) {
     if (current_time - last_write_time <= TIME_WINDOW) {
         write_count++;
         if (write_count > MAX_WRITE_COUNT) {
-            return 1; // too many write_count
+            return 1; // 너무 많은 쓰기 작업
         }
     } else {
-        write_count = 1; // after few minute
+        write_count = 1; // 쓰기 작업 카운트 초기화
     }
 
     if (size > MAX_WRITE_SIZE) {
-        return 1;  // too big size
+        return 1; // 파일 크기가 너무 큼
     }
 
     last_write_time = current_time;
-    return 0; // normal write
+    return 0; // 정상 쓰기
 }
 
-// 확장자 검사 함수 (읽기 전용 파일 여부 확인)
+// 읽기 전용 확장자 확인 함수
 static int is_read_only(const char *path) {
     const char *ext = strrchr(path, '.');
-    if (ext) {
-        if (strcmp(ext, ".mp3") == 0 || strcmp(ext, ".pdf") == 0)
-            return 1;  // 읽기 전용
+    if (ext && (strcmp(ext, ".mp3") == 0 || strcmp(ext, ".pdf") == 0)) {
+        return 1; // 읽기 전용 확장자
     }
-    return 0;  // 읽기/쓰기 가능
+    return 0; // 읽기/쓰기 가능
 }
 
-// 상대 경로로 변환
+// 상대 경로로 변환 함수
 static void get_relative_path(const char *path, char *relpath) {
     if (strcmp(path, "/") == 0 || strcmp(path, "") == 0) {
         strcpy(relpath, ".");
@@ -136,10 +127,10 @@ static void get_relative_path(const char *path, char *relpath) {
     }
 }
 
-// getattr 함수 구현
+// `getattr` 함수: 파일 속성 가져오기
 static int myfs_getattr(const char *path, struct stat *stbuf,
                         struct fuse_file_info *fi) {
-    (void) fi;
+    (void)fi;
     int res;
     char relpath[PATH_MAX];
     get_relative_path(path, relpath);
@@ -148,147 +139,86 @@ static int myfs_getattr(const char *path, struct stat *stbuf,
     if (res == -1)
         return -errno;
 
-    // .mp3, .pdf 파일에 대해 쓰기 권한 제거
     if (is_read_only(relpath)) {
-        stbuf->st_mode &= ~(S_IWUSR | S_IWGRP | S_IWOTH);
+        stbuf->st_mode &= ~(S_IWUSR | S_IWGRP | S_IWOTH); // 쓰기 권한 제거
     }
 
     return 0;
 }
 
-// write 함수 구현 (읽기 전용 권한 부여)
+// `readdir` 함수: 디렉토리 내용 읽기
+static int myfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+                        off_t offset, struct fuse_file_info *fi,
+                        enum fuse_readdir_flags flags) {
+    (void)offset;
+    (void)fi;
+    (void)flags;
+
+    DIR *dp;
+    struct dirent *de;
+    int fd;
+    char relpath[PATH_MAX];
+
+    get_relative_path(path, relpath);
+
+    fd = openat(base_fd, relpath, O_RDONLY | O_DIRECTORY);
+    if (fd == -1)
+        return -errno;
+
+    dp = fdopendir(fd);
+    if (dp == NULL) {
+        close(fd);
+        return -errno;
+    }
+
+    while ((de = readdir(dp)) != NULL) {
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+        st.st_ino = de->d_ino;
+        st.st_mode = de->d_type << 12;
+
+        if (is_read_only(de->d_name)) {
+            st.st_mode &= ~(S_IWUSR | S_IWGRP | S_IWOTH);
+        }
+
+        if (filler(buf, de->d_name, &st, 0, 0))
+            break;
+    }
+
+    closedir(dp);
+    return 0;
+}
+
+// `write` 함수: 엔트로피 감지 및 ransomware 방지
 static int myfs_write(const char *path, const char *buf, size_t size, off_t offset,
                       struct fuse_file_info *fi) {
     char relpath[PATH_MAX];
     get_relative_path(path, relpath);
 
-    // .mp3, .pdf 파일에 대한 쓰기 작업 차단
     if (is_read_only(relpath)) {
-        return -EACCES;
+        return -EACCES; // 읽기 전용 파일에 대한 쓰기 차단
     }
 
-    // 새로운 엔트로피 계산
     double new_entropy = calculate_entropy(buf, size);
-
-    // 엔트로피 증가 탐지 (임계값 설정: 1.0)
-    if (detect_entropy_increase(path, new_entropy, 1.0)) {
-        fprintf(stderr, "Entropy increase detected in file: %s\n", path);
-        return -EACCES; // 작업 차단
-    }
-
-    // 엔트로피 기록 업데이트
-    log_file_entropy(path, new_entropy);
-
-    // 비정상적인 쓰기 작업 감지 (예: 크기나 빈도가 과도하게 많을 경우)
     if (detect_ransomware_activity(size)) {
-        printf("Suspicious write activity detected!\n");
-        return -EIO;  // 비정상적인 쓰기 거부
+        fprintf(stderr, "Suspicious write activity detected: %s\n", path);
+        return -EIO; // 쓰기 작업 차단
     }
+
+    log_file_entropy(path, new_entropy);
 
     int res = pwrite(fi->fh, buf, size, offset);
     if (res == -1)
-        res = -errno;
+        return -errno;
 
     return res;
 }
 
-// unlink 함수 구현 (읽기 전용 파일 삭제 차단)
-static int myfs_unlink(const char *path) {
-    char relpath[PATH_MAX];
-    get_relative_path(path, relpath);
-
-    // .mp3, .pdf 파일 삭제 차단
-    if (is_read_only(relpath)) {
-        return -EACCES;
-    }
-
-    int res = unlinkat(base_fd, relpath, 0);
-    if (res == -1)
-        return -errno;
-
-    return 0;
-}
-
-// release 함수 구현
-static int myfs_release(const char *path, struct fuse_file_info *fi) {
-    close(fi->fh);
-    return 0;
-}
-
-// mkdir 함수 구현
-static int myfs_mkdir(const char *path, mode_t mode) {
-    int res;
-    char relpath[PATH_MAX];
-    get_relative_path(path, relpath);
-
-    res = mkdirat(base_fd, relpath, mode);
-    if (res == -1)
-        return -errno;
-
-    return 0;
-}
-
-// rmdir 함수 구현
-static int myfs_rmdir(const char *path) {
-    int res;
-    char relpath[PATH_MAX];
-    get_relative_path(path, relpath);
-
-    res = unlinkat(base_fd, relpath, AT_REMOVEDIR);
-    if (res == -1)
-        return -errno;
-
-    return 0;
-}
-
-// rename 함수 구현 (읽기 전용 파일의 이름 변경 차단)
-static int myfs_rename(const char *from, const char *to, unsigned int flags) {
-    int res;
-    char relfrom[PATH_MAX];
-    char relto[PATH_MAX];
-    get_relative_path(from, relfrom);
-    get_relative_path(to, relto);
-
-    // 읽기 전용 파일의 이름 변경 차단
-    if (is_read_only(relfrom)) {
-        return -EACCES;
-    }
-
-    res = renameat(base_fd, relfrom, base_fd, relto);
-    if (res == -1)
-        return -errno;
-
-    return 0;
-}
-
-// utimens 함수 구현
-static int myfs_utimens(const char *path, const struct timespec tv[2],
-                        struct fuse_file_info *fi) {
-    int res;
-    char relpath[PATH_MAX];
-    get_relative_path(path, relpath);
-
-    if (fi != NULL && fi->fh != 0) {
-        res = futimens(fi->fh, tv);
-    } else {
-        res = utimensat(base_fd, relpath, tv, 0);
-    }
-    if (res == -1)
-        return -errno;
-
-    return 0;
-}
-
-// 파일시스템 연산자 구조체
+// FUSE 연산자 구조체
 static const struct fuse_operations myfs2_oper = {
-        .getattr    = myfs_getattr,
-        .write      = myfs_write,
-        .release    = myfs_release,
-        .unlink     = myfs_unlink,
-        .mkdir      = myfs_mkdir,
-        .rmdir      = myfs_rmdir,
-        .rename     = myfs_rename,
-        .utimens    = myfs_utimens,
+        .getattr = myfs_getattr,
+        .readdir = myfs_readdir,
+        .write   = myfs_write,
 };
 
 int main(int argc, char *argv[]) {
@@ -299,14 +229,12 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    // 마운트 포인트 경로를 저장
     char *mountpoint = realpath(argv[argc - 1], NULL);
     if (mountpoint == NULL) {
         perror("realpath");
         return -1;
     }
 
-    // 마운트하기 전에 마운트 포인트 디렉터리를 엽니다.
     base_fd = open(mountpoint, O_RDONLY | O_DIRECTORY);
     if (base_fd == -1) {
         perror("open");
@@ -316,7 +244,6 @@ int main(int argc, char *argv[]) {
 
     free(mountpoint);
 
-    // FUSE 파일시스템 실행
     int ret = fuse_main(args.argc, args.argv, &myfs2_oper, NULL);
 
     close(base_fd);

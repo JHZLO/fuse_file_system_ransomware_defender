@@ -17,16 +17,18 @@
 #define READ_ONLY_EXT ".ro" // 읽기 전용 확장자
 #define MAX_FILES 100
 
-// 파일 엔트로피 저장 구조체
+// 파일 엔트로피 저장을 위한 구조체 및 배열
 typedef struct {
     char path[PATH_MAX];
     double entropy;
 } FileEntropy;
 
+#define MAX_FILES 100
+static FileEntropy file_entropy_log[MAX_FILES];
+static int entropy_log_index = 0;
 static int base_fd = -1;
-FileEntropy file_entropy_log[MAX_FILES];
-int entropy_log_index = 0;
 pthread_mutex_t entropy_lock = PTHREAD_MUTEX_INITIALIZER;
+
 
 // 확장자 검사 함수
 static int is_read_only(const char *path) {
@@ -43,6 +45,45 @@ static void get_relative_path(const char *path, char *relpath) {
             path++;
         strncpy(relpath, path, PATH_MAX);
     }
+}
+
+// 파일 엔트로피 저장
+void log_file_entropy(const char *path, double entropy) {
+    pthread_mutex_lock(&entropy_lock);
+    int found = 0;
+    for (int i = 0; i < entropy_log_index; i++) {
+        if (strcmp(file_entropy_log[i].path, path) == 0) {
+            file_entropy_log[i].entropy = entropy;
+            found = 1;
+            break;
+        }
+    }
+    if (!found && entropy_log_index < MAX_FILES) {
+        strncpy(file_entropy_log[entropy_log_index].path, path, PATH_MAX);
+        file_entropy_log[entropy_log_index].entropy = entropy;
+        entropy_log_index++;
+    }
+    pthread_mutex_unlock(&entropy_lock);
+}
+
+// 이전 엔트로피 가져오기
+double get_previous_entropy(const char *path) {
+    pthread_mutex_lock(&entropy_lock);
+    for (int i = 0; i < entropy_log_index; i++) {
+        if (strcmp(file_entropy_log[i].path, path) == 0) {
+            pthread_mutex_unlock(&entropy_lock);
+            return file_entropy_log[i].entropy;
+        }
+    }
+    pthread_mutex_unlock(&entropy_lock);
+    return -1.0; // 이전 기록이 없으면 -1 반환
+}
+
+// 엔트로피 차이를 통해 암호화 의심 탐지
+int detect_entropy_increase(const char *path, double new_entropy, double threshold) {
+    double previous_entropy = get_previous_entropy(path);
+    if (previous_entropy < 0) return 0; // 이전 엔트로피 기록 없음
+    return (new_entropy - previous_entropy) > threshold;
 }
 
 // 엔트로피 계산 함수
@@ -62,56 +103,6 @@ static double calculate_entropy(const char *data, size_t size) {
         }
     }
     return entropy;
-}
-
-// Cross Entropy 탐지
-static int detect_cross_entropy_anomaly(const char *path, const char *buf, size_t size, double threshold) {
-    if (size < 256) { // 너무 작은 데이터는 엔트로피 계산 제외
-        fprintf(stderr, "Data size too small for entropy calculation: %lu bytes\n", size);
-        return 0;
-    }
-
-    double current_entropy = calculate_entropy(buf, size);
-
-    pthread_mutex_lock(&entropy_lock);
-    double previous_entropy = -1.0;
-    for (int i = 0; i < entropy_log_index; i++) {
-        if (strcmp(file_entropy_log[i].path, path) == 0) {
-            previous_entropy = file_entropy_log[i].entropy;
-            break;
-        }
-    }
-
-    if (previous_entropy < 0.0) { // 새로운 파일
-        if (entropy_log_index < MAX_FILES) {
-            strncpy(file_entropy_log[entropy_log_index].path, path, PATH_MAX);
-            file_entropy_log[entropy_log_index].entropy = current_entropy;
-            entropy_log_index++;
-        }
-        pthread_mutex_unlock(&entropy_lock);
-        return 0; // 이상 없음
-    }
-
-    double cross_entropy_diff = fabs(current_entropy - previous_entropy);
-    pthread_mutex_unlock(&entropy_lock);
-
-    fprintf(stderr, "File: %s, Current Entropy: %.2f, Previous Entropy: %.2f, Diff: %.2f\n",
-            path, current_entropy, previous_entropy, cross_entropy_diff);
-
-    if (cross_entropy_diff > threshold) {
-        fprintf(stderr, "Cross Entropy Anomaly Detected: %s (Diff: %.2f)\n", path, cross_entropy_diff);
-        return 1; // 이상 탐지
-    }
-
-    pthread_mutex_lock(&entropy_lock);
-    for (int i = 0; i < entropy_log_index; i++) {
-        if (strcmp(file_entropy_log[i].path, path) == 0) {
-            file_entropy_log[i].entropy = current_entropy;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&entropy_lock);
-    return 0;
 }
 
 // `getattr` 함수
@@ -201,25 +192,39 @@ static int myfs_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 
-// `write` 함수
+// myfs_write 함수 수정
 static int myfs_write(const char *path, const char *buf, size_t size, off_t offset,
                       struct fuse_file_info *fi) {
     char relpath[PATH_MAX];
     get_relative_path(path, relpath);
 
-    if (is_read_only(relpath)) {
-        return -EACCES;
+    // 새로운 엔트로피 계산
+    double new_entropy = calculate_entropy(buf, size);
+
+    // 이전 엔트로피 가져오기
+    double previous_entropy = get_previous_entropy(path);
+
+    // 터미널로 로그 출력
+    fprintf(stderr, "[LOG] File: %s | Previous Entropy: %.2f | New Entropy: %.2f | Diff: %.2f\n",
+            path,
+            (previous_entropy >= 0) ? previous_entropy : 0.0, // 이전 엔트로피가 없으면 0.0 출력
+            new_entropy,
+            (previous_entropy >= 0) ? (new_entropy - previous_entropy) : 0.0);
+    fflush(stderr);
+
+    // 엔트로피 증가 탐지 (임계값 설정: 1.0)
+    if (detect_entropy_increase(path, new_entropy, 1.0)) {
+        fprintf(stderr, "Entropy increase detected in file: %s\n", path);
+        fflush(stderr);
+        return -EACCES; // 작업 차단
     }
 
-    if (detect_cross_entropy_anomaly(relpath, buf, size, 1.0)) {
-        fprintf(stderr, "[%ld] Write Blocked: Cross Entropy Anomaly Detected (%s)\n", time(NULL), relpath);
-        return -EACCES; // 이상 탐지 시 차단
-    }
+    // 엔트로피 기록 업데이트
+    log_file_entropy(path, new_entropy);
 
+    // 기존 쓰기 작업 수행
     int res = pwrite(fi->fh, buf, size, offset);
-    if (res == -1)
-        return -errno;
-
+    if (res == -1) res = -errno;
     return res;
 }
 
@@ -331,16 +336,42 @@ static const struct fuse_operations myfs2_oper = {
 
 // main 함수
 int main(int argc, char *argv[]) {
-    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <mountpoint>\n", argv[0]);
         return -1;
     }
 
+    // FUSE 인자를 수동으로 초기화
+    struct fuse_args args = FUSE_ARGS_INIT(0, NULL);
+
+    // 프로그램 이름 추가
+    if (fuse_opt_add_arg(&args, argv[0]) == -1) {
+        fprintf(stderr, "Failed to add program name to fuse args\n");
+        fuse_opt_free_args(&args);
+        return -1;
+    }
+
+    // "-f" 옵션 추가 (포그라운드 실행)
+    if (fuse_opt_add_arg(&args, "-f") == -1) {
+        fprintf(stderr, "Failed to add '-f' option to fuse args\n");
+        fuse_opt_free_args(&args);
+        return -1;
+    }
+
+    // 기존 인자 추가
+    for (int i = 1; i < argc; i++) {
+        if (fuse_opt_add_arg(&args, argv[i]) == -1) {
+            fprintf(stderr, "Failed to add argument '%s' to fuse args\n", argv[i]);
+            fuse_opt_free_args(&args);
+            return -1;
+        }
+    }
+
+    // 마운트 경로 확인
     char *mountpoint = realpath(argv[argc - 1], NULL);
     if (!mountpoint) {
         perror("realpath");
+        fuse_opt_free_args(&args);
         return -1;
     }
 
@@ -348,11 +379,19 @@ int main(int argc, char *argv[]) {
     if (base_fd == -1) {
         perror("open");
         free(mountpoint);
+        fuse_opt_free_args(&args);
         return -1;
     }
-
     free(mountpoint);
+
+    // FUSE 실행
     int ret = fuse_main(args.argc, args.argv, &myfs2_oper, NULL);
+
+    // 자원 해제
+    fuse_opt_free_args(&args);
     close(base_fd);
+
     return ret;
 }
+
+

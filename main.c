@@ -51,13 +51,13 @@ static double calculate_entropy(const char *data, size_t size) {
 
     int counts[256] = {0};
     for (size_t i = 0; i < size; i++) {
-        counts[(unsigned char)data[i]]++;
+        counts[(unsigned char) data[i]]++;
     }
 
     double entropy = 0.0;
     for (int i = 0; i < 256; i++) {
         if (counts[i] > 0) {
-            double p = (double)counts[i] / size;
+            double p = (double) counts[i] / size;
             entropy -= p * log2(p);
         }
     }
@@ -66,6 +66,11 @@ static double calculate_entropy(const char *data, size_t size) {
 
 // Cross Entropy 탐지
 static int detect_cross_entropy_anomaly(const char *path, const char *buf, size_t size, double threshold) {
+    if (size < 256) { // 너무 작은 데이터는 엔트로피 계산 제외
+        fprintf(stderr, "Data size too small for entropy calculation: %lu bytes\n", size);
+        return 0;
+    }
+
     double current_entropy = calculate_entropy(buf, size);
 
     pthread_mutex_lock(&entropy_lock);
@@ -77,25 +82,27 @@ static int detect_cross_entropy_anomaly(const char *path, const char *buf, size_
         }
     }
 
-    if (previous_entropy < 0.0) { // 이전 엔트로피 기록 없음
+    if (previous_entropy < 0.0) { // 새로운 파일
         if (entropy_log_index < MAX_FILES) {
             strncpy(file_entropy_log[entropy_log_index].path, path, PATH_MAX);
             file_entropy_log[entropy_log_index].entropy = current_entropy;
             entropy_log_index++;
         }
         pthread_mutex_unlock(&entropy_lock);
-        return 0; // 기록이 없으므로 이상 없음
+        return 0; // 이상 없음
     }
 
     double cross_entropy_diff = fabs(current_entropy - previous_entropy);
     pthread_mutex_unlock(&entropy_lock);
+
+    fprintf(stderr, "File: %s, Current Entropy: %.2f, Previous Entropy: %.2f, Diff: %.2f\n",
+            path, current_entropy, previous_entropy, cross_entropy_diff);
 
     if (cross_entropy_diff > threshold) {
         fprintf(stderr, "Cross Entropy Anomaly Detected: %s (Diff: %.2f)\n", path, cross_entropy_diff);
         return 1; // 이상 탐지
     }
 
-    // 엔트로피 업데이트
     pthread_mutex_lock(&entropy_lock);
     for (int i = 0; i < entropy_log_index; i++) {
         if (strcmp(file_entropy_log[i].path, path) == 0) {
@@ -109,7 +116,7 @@ static int detect_cross_entropy_anomaly(const char *path, const char *buf, size_
 
 // `getattr` 함수
 static int myfs_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi) {
-    (void)fi;
+    (void) fi;
     char relpath[PATH_MAX];
     get_relative_path(path, relpath);
 
@@ -128,9 +135,9 @@ static int myfs_getattr(const char *path, struct stat *stbuf, struct fuse_file_i
 static int myfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                         off_t offset, struct fuse_file_info *fi,
                         enum fuse_readdir_flags flags) {
-    (void)offset;
-    (void)fi;
-    (void)flags;
+    (void) offset;
+    (void) fi;
+    (void) flags;
 
     DIR *dp;
     struct dirent *de;
@@ -251,7 +258,7 @@ static int myfs_unlink(const char *path) {
 
 // 기타 함수
 static int myfs_release(const char *path, struct fuse_file_info *fi) {
-    (void)path;
+    (void) path;
     close(fi->fh);
     return 0;
 }

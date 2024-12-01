@@ -3,6 +3,7 @@
 #include <fuse3/fuse.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -22,6 +23,45 @@ typedef struct {
     char path[PATH_MAX];
     double entropy;
 } FileEntropy;
+
+typedef struct {
+    const char *ext;
+    double threshold;
+} FileThreshold;
+
+// 확장자별 임계값
+const FileThreshold thresholds[] = {
+        {".txt", 2.5},
+        {".docx", 1.2},
+        {".doc", 1.2},
+        {".dll", 0.8},
+        {".mp3", 0.5},
+        {".csv", 1.5},
+        {".jpg", 0.8},
+        {".pptx", 1.5},
+        {".pdf", 1.0},
+        {".json", 1.0},
+        {".log", 1.2},
+        {".xlsx", 1.5},
+        {".xls", 1.5},
+        {".exe", 0.8},
+        {".bmp", 0.8},
+        {".zip", 0.5},
+        {".svg", 1.0},
+        {".html", 1.2},
+        {".c", 1.0},
+        {".cpp", 1.0},
+        {".py", 1.0},
+        {".tmp", 1.0},
+        {".hwp", 1.5},
+        {".hwpx", 1.5},
+        {".db", 0.8},
+        {".ppt", 1.5},
+        {".old", 1.0},
+        {".png", 0.8},
+        {".mp4", 0.5},
+        {NULL, 1.0}
+};
 
 #define MAX_FILES 100
 static FileEntropy file_entropy_log[MAX_FILES];
@@ -44,6 +84,18 @@ static void get_relative_path(const char *path, char *relpath) {
             path++;
         strncpy(relpath, path, PATH_MAX);
     }
+}
+
+double get_threshold_by_extension(const char *path) {
+    const char *ext = strrchr(path, '.'); // 확장자 찾기
+    if (ext) {
+        for (size_t i = 0; thresholds[i].ext != NULL; i++) {
+            if (strcmp(ext, thresholds[i].ext) == 0) {
+                return thresholds[i].threshold;
+            }
+        }
+    }
+    return 1.0; // 기본 임계값
 }
 
 // 파일 엔트로피 저장
@@ -266,6 +318,8 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
     // 새 데이터의 엔트로피 계산
     double new_entropy = calculate_entropy(buf, size);
 
+    double threshold = get_threshold_by_extension(path);
+
     // 로그 출력
     fprintf(stderr, "[LOG] File: %s | Previous Entropy: %.2f | New Entropy: %.2f | Diff: %.2f\n",
             relpath,
@@ -275,7 +329,7 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
     fflush(stderr);
 
     // 엔트로피 차이 확인
-    if (detect_entropy_increase(path, new_entropy, 2.0)) {
+    if (detect_entropy_increase(path, new_entropy, threshold)) {
         fprintf(stderr, "Entropy increase detected in file: %s\n", path);
         fflush(stderr);
         return -EACCES; // 작업 차단

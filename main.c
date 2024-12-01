@@ -182,6 +182,18 @@ static int myfs_open(const char *path, struct fuse_file_info *fi) {
     return 0;
 }
 
+static int myfs_read(const char *path, char *buf, size_t size, off_t offset,
+                     struct fuse_file_info *fi) {
+    int res;
+
+    res = pread(fi->fh, buf, size, offset);
+    if (res == -1)
+        res = -errno;
+
+    return res;
+}
+
+
 // `write` 함수
 static int myfs_write(const char *path, const char *buf, size_t size, off_t offset,
                       struct fuse_file_info *fi) {
@@ -295,17 +307,18 @@ static int myfs_utimens(const char *path, const struct timespec tv[2],
 
 // FUSE 연산자 구조체
 static const struct fuse_operations myfs2_oper = {
-        .getattr = myfs_getattr,
-        .readdir = myfs_readdir,
-        .open    = myfs_open,
-        .write   = myfs_write,
-        .create  = myfs_create,
-        .unlink  = myfs_unlink,
-        .release = myfs_release,
-        .mkdir   = myfs_mkdir,
-        .rmdir   = myfs_rmdir,
-        .rename  = myfs_rename,
-        .utimens = myfs_utimens,
+        .getattr    = myfs_getattr,
+        .readdir    = myfs_readdir,
+        .open       = myfs_open,
+        .create     = myfs_create,
+        .read       = myfs_read,
+        .write      = myfs_write,
+        .release    = myfs_release,
+        .unlink     = myfs_unlink,
+        .mkdir      = myfs_mkdir,
+        .rmdir      = myfs_rmdir,
+        .rename     = myfs_rename,
+        .utimens    = myfs_utimens,
 };
 
 // main 함수

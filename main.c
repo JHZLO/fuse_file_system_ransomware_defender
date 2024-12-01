@@ -205,6 +205,7 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
     }
 
     if (detect_cross_entropy_anomaly(relpath, buf, size, 1.0)) {
+        fprintf(stderr, "[%ld] Write Blocked: Cross Entropy Anomaly Detected (%s)\n", time(NULL), relpath);
         return -EACCES; // 이상 탐지 시 차단
     }
 

@@ -29,7 +29,6 @@ static int entropy_log_index = 0;
 static int base_fd = -1;
 pthread_mutex_t entropy_lock = PTHREAD_MUTEX_INITIALIZER;
 
-
 // 확장자 검사 함수
 static int is_read_only(const char *path) {
     const char *ext = strrchr(path, '.');
@@ -68,9 +67,12 @@ void log_file_entropy(const char *path, double entropy) {
 
 // 이전 엔트로피 가져오기
 double get_previous_entropy(const char *path) {
+    char relpath[PATH_MAX];
+    get_relative_path(path, relpath); // 상대 경로로 변환
+
     pthread_mutex_lock(&entropy_lock);
     for (int i = 0; i < entropy_log_index; i++) {
-        if (strcmp(file_entropy_log[i].path, path) == 0) {
+        if (strcmp(file_entropy_log[i].path, relpath) == 0) {
             pthread_mutex_unlock(&entropy_lock);
             return file_entropy_log[i].entropy;
         }
@@ -78,6 +80,7 @@ double get_previous_entropy(const char *path) {
     pthread_mutex_unlock(&entropy_lock);
     return -1.0; // 이전 기록이 없으면 -1 반환
 }
+
 
 // 엔트로피 차이를 통해 암호화 의심 탐지
 int detect_entropy_increase(const char *path, double new_entropy, double threshold) {
@@ -103,6 +106,66 @@ static double calculate_entropy(const char *data, size_t size) {
         }
     }
     return entropy;
+}
+
+// 마운트 이전의 시점에 대한 파일 엔트로피 기록
+void initialize_entropy_log(const char *mountpoint) {
+    DIR *dp = opendir(mountpoint);
+    if (!dp) {
+        perror("opendir");
+        return;
+    }
+
+    struct dirent *entry;
+    char filepath[PATH_MAX];
+    char relpath[PATH_MAX];
+
+    while ((entry = readdir(dp)) != NULL) {
+        // 현재 디렉토리 및 상위 디렉토리는 건너뜀
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        snprintf(filepath, PATH_MAX, "%s/%s", mountpoint, entry->d_name);
+
+        struct stat st;
+        if (stat(filepath, &st) == -1) {
+            perror("stat");
+            continue;
+        }
+
+        // 파일인 경우 엔트로피 계산
+        if (S_ISREG(st.st_mode)) {
+            FILE *file = fopen(filepath, "rb");
+            if (!file) {
+                perror("fopen");
+                continue;
+            }
+
+            char *buffer = malloc(st.st_size);
+            if (!buffer) {
+                perror("malloc");
+                fclose(file);
+                continue;
+            }
+
+            size_t bytesRead = fread(buffer, 1, st.st_size, file);
+            fclose(file);
+
+            if (bytesRead > 0) {
+                // 상대 경로로 변환
+                snprintf(relpath, PATH_MAX, "/%s", entry->d_name);
+                get_relative_path(relpath, relpath); // 상대 경로 변환
+                double entropy = calculate_entropy(buffer, bytesRead);
+                log_file_entropy(relpath, entropy);
+                fprintf(stderr, "[INIT] File: %s | Initial Entropy: %.2f\n", relpath, entropy);
+            }
+
+            free(buffer);
+        }
+    }
+
+    closedir(dp);
 }
 
 // `getattr` 함수
@@ -192,41 +255,44 @@ static int myfs_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 
-// myfs_write 함수 수정
 static int myfs_write(const char *path, const char *buf, size_t size, off_t offset,
                       struct fuse_file_info *fi) {
     char relpath[PATH_MAX];
-    get_relative_path(path, relpath);
-
-    // 새로운 엔트로피 계산
-    double new_entropy = calculate_entropy(buf, size);
+    get_relative_path(path, relpath);  // 상대 경로 생성
 
     // 이전 엔트로피 가져오기
-    double previous_entropy = get_previous_entropy(path);
+    double previous_entropy = get_previous_entropy(relpath);
 
-    // 터미널로 로그 출력
+    // 새 데이터의 엔트로피 계산
+    double new_entropy = calculate_entropy(buf, size);
+
+    // 로그 출력
     fprintf(stderr, "[LOG] File: %s | Previous Entropy: %.2f | New Entropy: %.2f | Diff: %.2f\n",
-            path,
-            (previous_entropy >= 0) ? previous_entropy : 0.0, // 이전 엔트로피가 없으면 0.0 출력
+            relpath,
+            (previous_entropy >= 0) ? previous_entropy : 0.0,
             new_entropy,
-            (previous_entropy >= 0) ? (new_entropy - previous_entropy) : 0.0);
+            (previous_entropy >= 0) ? fabs(new_entropy - previous_entropy) : new_entropy);
     fflush(stderr);
 
-    // 엔트로피 증가 탐지 (임계값 설정: 1.0)
-    if (detect_entropy_increase(path, new_entropy, 1.0)) {
+    // 엔트로피 차이 확인
+    if (detect_entropy_increase(path, new_entropy, 2.0)) {
         fprintf(stderr, "Entropy increase detected in file: %s\n", path);
         fflush(stderr);
         return -EACCES; // 작업 차단
     }
 
-    // 엔트로피 기록 업데이트
-    log_file_entropy(path, new_entropy);
+    // 새로운 엔트로피 기록
+    log_file_entropy(relpath, new_entropy);
 
     // 기존 쓰기 작업 수행
     int res = pwrite(fi->fh, buf, size, offset);
     if (res == -1) res = -errno;
+
     return res;
 }
+
+
+
 
 // `create` 함수
 static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
@@ -382,6 +448,10 @@ int main(int argc, char *argv[]) {
         fuse_opt_free_args(&args);
         return -1;
     }
+
+    // 기존 파일의 초기 엔트로피 기록
+    initialize_entropy_log(mountpoint);
+
     free(mountpoint);
 
     // FUSE 실행

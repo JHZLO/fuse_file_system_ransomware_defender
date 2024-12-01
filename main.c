@@ -335,6 +335,14 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
         return -EACCES; // 작업 차단
     }
 
+    // 절대 엔트로피 기준 확인
+    if (new_entropy > 8.5) {
+        fprintf(stderr, "[BLOCKED] High absolute entropy detected in file: %s | Entropy: %.2f\n",
+                path, new_entropy);
+        fflush(stderr);
+        return -EACCES; // 작업 차단
+    }
+
     // 새로운 엔트로피 기록
     log_file_entropy(relpath, new_entropy);
 

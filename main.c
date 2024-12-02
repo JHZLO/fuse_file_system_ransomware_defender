@@ -15,65 +15,79 @@
 #include <math.h>
 #include <pthread.h>
 
-#define READ_ONLY_EXT ".ro" // 읽기 전용 확장자
+#define READ_ONLY_EXT ".ro"
 #define MAX_FILES 100
+#define HEADER_SIZE 4
+#define MAX_WRITE_SIZE 1048576 // 1MB
+#define MAX_WRITE_COUNT 50
+#define TIME_WINDOW 60
 
-// 파일 엔트로피 저장을 위한 구조체 및 배열
+// 예상되는 헤더 (매직 넘버) 값들
+#define PNG_HEADER    { 0x89, 0x50, 0x4E, 0x47 }  // PNG 파일 헤더
+#define JPG_HEADER    { 0xFF, 0xD8, 0xFF, 0xE0 }  // JPEG 파일 헤더
+#define XLSX_HEADER   { 0x50, 0x4B, 0x03, 0x04 }  // xlsx 파일 헤더
+#define PPTX_HEADER   { 0x50, 0x4B, 0x03, 0x04 }  // pptx 파일 헤더
+#define HWP_HEADER    { 0xED, 0xAB, 0xEE, 0xDB }  // hwp 파일 헤더
+#define DOCX_HEADER   { 0x50, 0x4B, 0x03, 0x04 }  // docx 파일 헤더
+#define DOC_HEADER    { 0xD0, 0xCF, 0x11, 0xE0 }  // doc 파일 헤더
+#define MP4_HEADER    { 0x00, 0x00, 0x00, 0x18 }  // mp4 파일 헤더
+#define ZIP_HEADER    { 0x50, 0x4B, 0x03, 0x04 }  // zip 파일 헤더
+#define SQLITE_HEADER { 0x53, 0x51, 0x4C, 0x69 }  // sqlite 파일 헤더
+
+// Trace variables
+static time_t last_write_time = 0;
+static int write_count = 0;
+
+// File entropy tracking
 typedef struct {
     char path[PATH_MAX];
     double entropy;
 } FileEntropy;
 
+static FileEntropy file_entropy_log[MAX_FILES];
+static int entropy_log_index = 0;
+static int base_fd = -1;
+
+pthread_mutex_t entropy_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// Thresholds for entropy
 typedef struct {
     const char *ext;
     double threshold;
 } FileThreshold;
 
-// 확장자별 임계값
 const FileThreshold thresholds[] = {
-        {".txt", 2.5},
-        {".docx", 1.2},
-        {".doc", 1.2},
-        {".dll", 0.8},
-        {".mp3", 0.5},
-        {".csv", 1.5},
-        {".jpg", 0.8},
+        {".txt",  2.5},
+        {".docx", 1.5},
+        {".doc",  1.2},
+        {".dll",  0.5},
+        {".mp3",  0.5},
+        {".csv",  1.5},
+        {".jpg",  0.5},
         {".pptx", 1.5},
-        {".pdf", 1.0},
+        {".pdf",  1.0},
         {".json", 1.0},
-        {".log", 1.2},
+        {".log",  1.2},
         {".xlsx", 1.5},
-        {".xls", 1.5},
-        {".exe", 0.8},
-        {".bmp", 0.8},
-        {".zip", 0.5},
-        {".svg", 1.0},
-        {".html", 1.2},
-        {".c", 1.0},
-        {".cpp", 1.0},
-        {".py", 1.0},
-        {".tmp", 1.0},
-        {".hwp", 1.5},
+        {".xls",  1.5},
+        {".exe",  0.5},
+        {".bmp",  0.5},
+        {".zip",  0.5},
+        {".svg",  1.0},
+        {".html", 1.5},
+        {".c",    1.0},
+        {".cpp",  1.0},
+        {".py",   1.0},
+        {".tmp",  1.0},
+        {".hwp",  1.5},
         {".hwpx", 1.5},
-        {".db", 0.8},
-        {".ppt", 1.5},
-        {".old", 1.0},
-        {".png", 0.8},
-        {".mp4", 0.5},
-        {NULL, 1.0}
+        {".db",   0.5},
+        {".ppt",  1.5},
+        {".old",  1.0},
+        {".png",  0.5},
+        {".mp4",  0.5},
+        {NULL,    1.0}
 };
-
-#define MAX_FILES 100
-static FileEntropy file_entropy_log[MAX_FILES];
-static int entropy_log_index = 0;
-static int base_fd = -1;
-pthread_mutex_t entropy_lock = PTHREAD_MUTEX_INITIALIZER;
-
-// 확장자 검사 함수
-static int is_read_only(const char *path) {
-    const char *ext = strrchr(path, '.');
-    return (ext && strcmp(ext, READ_ONLY_EXT) == 0);
-}
 
 // 상대 경로로 변환
 static void get_relative_path(const char *path, char *relpath) {
@@ -84,6 +98,91 @@ static void get_relative_path(const char *path, char *relpath) {
             path++;
         strncpy(relpath, path, PATH_MAX);
     }
+}
+
+// 확장자에 맞는 헤더 검증 함수
+int check_header_for_extension(const char *path, const unsigned char *data) {
+    if (strstr(path, ".png") != NULL) {
+        unsigned char png_header[] = PNG_HEADER;
+        if (memcmp(data, png_header, HEADER_SIZE) != 0) {
+            return 1;  // 잘못된 PNG 헤더
+        }
+    } else if (strstr(path, ".jpg") != NULL || strstr(path, ".jpeg") != NULL) {
+        unsigned char jpg_header[] = JPG_HEADER;
+        if (memcmp(data, jpg_header, HEADER_SIZE) != 0) {
+            return 1;  // 잘못된 JPEG 헤더
+        }
+    } else if (strstr(path, ".xlsx") != NULL) {
+        unsigned char xlsx_header[] = XLSX_HEADER;
+        if (memcmp(data, xlsx_header, HEADER_SIZE) != 0) {
+            return 1;  // 잘못된 xlsx 헤더
+        }
+    } else if (strstr(path, ".pptx") != NULL) {
+        unsigned char pptx_header[] = PPTX_HEADER;
+        if (memcmp(data, pptx_header, HEADER_SIZE) != 0) {
+            return 1;  // 잘못된 pptx 헤더
+        }
+    } else if (strstr(path, ".hwp") != NULL) {
+        unsigned char hwp_header[] = HWP_HEADER;
+        if (memcmp(data, hwp_header, HEADER_SIZE) != 0) {
+            return 1;  // 잘못된 hwp 헤더
+        }
+    } else if (strstr(path, ".docx") != NULL) {
+        unsigned char docx_header[] = DOCX_HEADER;
+        if (memcmp(data, docx_header, HEADER_SIZE) != 0) {
+            return 1;  // 잘못된 docx 헤더
+        }
+    } else if (strstr(path, ".doc") != NULL) {
+        unsigned char doc_header[] = DOC_HEADER;
+        if (memcmp(data, doc_header, HEADER_SIZE) != 0) {
+            return 1;  // 잘못된 doc 헤더
+        }
+    } else if (strstr(path, ".mp4") != NULL) {
+        unsigned char mp4_header[] = MP4_HEADER;
+        if (memcmp(data, mp4_header, HEADER_SIZE) != 0) {
+            return 1;  // 잘못된 mp4 헤더
+        }
+    } else if (strstr(path, ".zip") != NULL) {
+        unsigned char zip_header[] = ZIP_HEADER;
+        if (memcmp(data, zip_header, HEADER_SIZE) != 0) {
+            return 1;  // 잘못된 zip 헤더
+        }
+    } else if (strstr(path, ".sqlite") != NULL) {
+        unsigned char sqlite_header[] = SQLITE_HEADER;
+        if (memcmp(data, sqlite_header, HEADER_SIZE) != 0) {
+            return 1;  // 잘못된 sqlite 헤더
+        }
+    } else {
+        return 0;  // 헤더를 확인할 수 없는 확장자
+    }
+    return 0;  // 올바른 헤더
+}
+
+static int detect_ransomware_activity(size_t size) {
+    time_t current_time;
+    time(&current_time);
+
+    if (current_time - last_write_time <= TIME_WINDOW) {
+        write_count++;
+        if (write_count > MAX_WRITE_COUNT) {
+            return 1; // too many write_count
+        }
+    } else {
+        write_count = 1; // after few minute
+    }
+
+    if (size > MAX_WRITE_SIZE) {
+        return 1;  // too big size
+    }
+
+    last_write_time = current_time;
+    return 0; // normal write
+}
+
+// 확장자 검사 함수
+static int is_read_only(const char *path) {
+    const char *ext = strrchr(path, '.');
+    return (ext && strcmp(ext, READ_ONLY_EXT) == 0);
 }
 
 double get_threshold_by_extension(const char *path) {
@@ -312,6 +411,10 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
     char relpath[PATH_MAX];
     get_relative_path(path, relpath);  // 상대 경로 생성
 
+    unsigned char *data = (unsigned char *) buf;
+    // 헤더 검사
+    int header_check_result = check_header_for_extension(path, data);
+
     // 이전 엔트로피 가져오기
     double previous_entropy = get_previous_entropy(relpath);
 
@@ -319,6 +422,22 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
     double new_entropy = calculate_entropy(buf, size);
 
     double threshold = get_threshold_by_extension(path);
+
+    // 헤더 검사결과로 차단여부 결정
+    if (header_check_result == 1) {
+        // 로그 출력
+        fprintf(stderr, "hedaer problem!!\n");
+        fflush(stderr);
+        return -EIO;
+    }
+
+    // 비정상적인 쓰기 작업 감지 (예: 크기나 빈도가 과도하게 많을 경우)
+    if (detect_ransomware_activity(size)) {
+        // 로그 출력
+        fprintf(stderr, "ransomwar!!!\n");
+        fflush(stderr);
+        return -EIO;  // unnormal write deny
+    }
 
     // 로그 출력
     fprintf(stderr, "[LOG] File: %s | Previous Entropy: %.2f | New Entropy: %.2f | Diff: %.2f\n",
@@ -335,14 +454,6 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
         return -EACCES; // 작업 차단
     }
 
-    // 절대 엔트로피 기준 확인
-    if (new_entropy > 8.5) {
-        fprintf(stderr, "[BLOCKED] High absolute entropy detected in file: %s | Entropy: %.2f\n",
-                path, new_entropy);
-        fflush(stderr);
-        return -EACCES; // 작업 차단
-    }
-
     // 새로운 엔트로피 기록
     log_file_entropy(relpath, new_entropy);
 
@@ -352,8 +463,6 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
 
     return res;
 }
-
-
 
 
 // `create` 함수
@@ -447,7 +556,7 @@ static int myfs_utimens(const char *path, const struct timespec tv[2],
 }
 
 // FUSE 연산자 구조체
-static const struct fuse_operations myfs2_oper = {
+static const struct fuse_operations fuse_oper = {
         .getattr    = myfs_getattr,
         .readdir    = myfs_readdir,
         .open       = myfs_open,
@@ -517,7 +626,7 @@ int main(int argc, char *argv[]) {
     free(mountpoint);
 
     // FUSE 실행
-    int ret = fuse_main(args.argc, args.argv, &myfs2_oper, NULL);
+    int ret = fuse_main(args.argc, args.argv, &fuse_oper, NULL);
 
     // 자원 해제
     fuse_opt_free_args(&args);

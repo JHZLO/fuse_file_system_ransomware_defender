@@ -14,8 +14,15 @@
 #include <sys/time.h>
 #include <math.h>
 #include <pthread.h>
+#include <signal.h>
+#include <ctype.h>
+#include <sys/types.h>
 
-#define READ_ONLY_EXT ".ro"
+// 미끼파일
+#define HONEYPOT_FILENAME "h_o_nne_y_p_o_t.txt"
+#define HONEYPOT_CONTENT "This is a honeypot file. Do not access."
+
+#define READ_ONLY_EXTENSIONS ".mp3", ".pdf"
 #define MAX_FILES 100
 #define HEADER_SIZE 4
 #define MAX_WRITE_SIZE 1048576 // 1MB
@@ -33,6 +40,9 @@
 #define MP4_HEADER    { 0x00, 0x00, 0x00, 0x18 }  // mp4 파일 헤더
 #define ZIP_HEADER    { 0x50, 0x4B, 0x03, 0x04 }  // zip 파일 헤더
 #define SQLITE_HEADER { 0x53, 0x51, 0x4C, 0x69 }  // sqlite 파일 헤더
+
+// 미끼 파일의 절대 경로
+static char honeypot_path[PATH_MAX];
 
 // Trace variables
 static time_t last_write_time = 0;
@@ -98,6 +108,70 @@ static void get_relative_path(const char *path, char *relpath) {
             path++;
         strncpy(relpath, path, PATH_MAX);
     }
+}
+
+// 미끼 파일을 연 프로세스 종료
+void terminate_ransomware_process(const char *path) {
+    DIR *proc_dir = opendir("/proc");
+    if (!proc_dir) {
+        perror("opendir /proc");
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(proc_dir)) != NULL) {
+        // 숫자로 된 디렉토리만 탐색 (프로세스 ID)
+        if (entry->d_type != DT_DIR || !isdigit(entry->d_name[0]))
+            continue;
+
+        char fd_path[PATH_MAX];
+        snprintf(fd_path, PATH_MAX, "/proc/%s/fd", entry->d_name);
+
+        DIR *fd_dir = opendir(fd_path);
+        if (!fd_dir) continue;
+
+        struct dirent *fd_entry;
+        while ((fd_entry = readdir(fd_dir)) != NULL) {
+            if (fd_entry->d_type != DT_LNK)
+                continue;
+
+            char link_target[PATH_MAX];
+            char full_fd_path[PATH_MAX];
+            snprintf(full_fd_path, PATH_MAX, "%s/%s", fd_path, fd_entry->d_name);
+
+            ssize_t len = readlink(full_fd_path, link_target, PATH_MAX - 1);
+            if (len != -1) {
+                link_target[len] = '\0';
+
+                // 미끼 파일을 연 프로세스 확인
+                if (strcmp(link_target, path) == 0) {
+                    pid_t pid = atoi(entry->d_name);
+                    fprintf(stderr, "Terminating process %d for accessing honeypot file: %s\n", pid, path);
+                    kill(pid, SIGKILL); // 프로세스 강제 종료
+                }
+            }
+        }
+        closedir(fd_dir);
+    }
+    closedir(proc_dir);
+}
+
+// 미끼 파일 생성 함수
+void create_honeypot_file(const char *mountpoint) {
+    snprintf(honeypot_path, PATH_MAX, "%s/%s", mountpoint, HONEYPOT_FILENAME);
+
+    FILE *honeypot_file = fopen(honeypot_path, "w");
+    if (!honeypot_file) {
+        perror("Failed to create honeypot file");
+        return;
+    }
+
+    if (fwrite(HONEYPOT_CONTENT, 1, strlen(HONEYPOT_CONTENT), honeypot_file) != strlen(HONEYPOT_CONTENT)) {
+        perror("Failed to write to honeypot file");
+    }
+    fclose(honeypot_file);
+
+    fprintf(stderr, "Honeypot file created at: %s\n", honeypot_path);
 }
 
 // 확장자에 맞는 헤더 검증 함수
@@ -179,10 +253,14 @@ static int detect_ransomware_activity(size_t size) {
     return 0; // normal write
 }
 
-// 확장자 검사 함수
-static int is_read_only(const char *path) {
-    const char *ext = strrchr(path, '.');
-    return (ext && strcmp(ext, READ_ONLY_EXT) == 0);
+// 확장자 검사 함수 (읽기 전용 파일 여부 확인)
+static int is_read_only(const char* path) {
+    const char* ext = strrchr(path, '.');
+    if (ext) {
+        if (strcmp(ext, ".mp3") == 0 || strcmp(ext, ".pdf") == 0)
+            return 1;  // 읽기 전용
+    }
+    return 0;  // 읽기/쓰기 가능
 }
 
 double get_threshold_by_extension(const char *path) {
@@ -382,8 +460,9 @@ static int myfs_open(const char *path, struct fuse_file_info *fi) {
     char relpath[PATH_MAX];
     get_relative_path(path, relpath);
 
-    if (is_read_only(relpath) && (fi->flags & O_WRONLY || fi->flags & O_RDWR)) {
-        return -EACCES;
+    // 미끼 파일 감지
+    if (strcmp(path, honeypot_path) == 0) {
+        terminate_ransomware_process(path); // 미끼 파일 접근 시 해당 프로세스 종료
     }
 
     int res = openat(base_fd, relpath, fi->flags);
@@ -396,9 +475,12 @@ static int myfs_open(const char *path, struct fuse_file_info *fi) {
 
 static int myfs_read(const char *path, char *buf, size_t size, off_t offset,
                      struct fuse_file_info *fi) {
-    int res;
+    // 미끼 파일 감지
+    if (strcmp(path, honeypot_path) == 0) {
+        terminate_ransomware_process(path); // 미끼 파일 접근 시 해당 프로세스 종료
+    }
 
-    res = pread(fi->fh, buf, size, offset);
+    int res = pread(fi->fh, buf, size, offset);
     if (res == -1)
         res = -errno;
 
@@ -422,6 +504,14 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
     double new_entropy = calculate_entropy(buf, size);
 
     double threshold = get_threshold_by_extension(path);
+       
+    // .mp3, .pdf 파일에 대한 쓰기 작업 차단
+    if (is_read_only(relpath)) {
+        // 로그 출력
+        fprintf(stderr, "read only file!!\n");
+        fflush(stderr);
+        return -EACCES;
+    }
 
     // 헤더 검사결과로 차단여부 결정
     if (header_check_result == 1) {
@@ -620,6 +710,9 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+    // 미끼 파일 생성
+    create_honeypot_file(mountpoint);
+
     // 기존 파일의 초기 엔트로피 기록
     initialize_entropy_log(mountpoint);
 
@@ -634,5 +727,3 @@ int main(int argc, char *argv[]) {
 
     return ret;
 }
-
-

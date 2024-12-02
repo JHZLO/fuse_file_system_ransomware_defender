@@ -57,6 +57,11 @@ typedef struct {
 static FileEntropy file_entropy_log[MAX_FILES];
 static int entropy_log_index = 0;
 static int base_fd = -1;
+// 미끼 파일의 절대 경로
+static char honeypot_path[PATH_MAX];
+// 미끼 파일의 상대 경로
+static char honeypot_relpath[PATH_MAX];
+
 
 pthread_mutex_t entropy_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -160,6 +165,10 @@ void terminate_ransomware_process(const char *path) {
 void create_honeypot_file(const char *mountpoint) {
     snprintf(honeypot_path, PATH_MAX, "%s/%s", mountpoint, HONEYPOT_FILENAME);
 
+    // 상대 경로 계산
+    snprintf(honeypot_relpath, PATH_MAX, "/%s", HONEYPOT_FILENAME);
+    get_relative_path(honeypot_relpath, honeypot_relpath);
+
     FILE *honeypot_file = fopen(honeypot_path, "w");
     if (!honeypot_file) {
         perror("Failed to create honeypot file");
@@ -173,6 +182,7 @@ void create_honeypot_file(const char *mountpoint) {
 
     fprintf(stderr, "Honeypot file created at: %s\n", honeypot_path);
 }
+
 
 // 확장자에 맞는 헤더 검증 함수
 int check_header_for_extension(const char *path, const unsigned char *data) {
@@ -461,8 +471,10 @@ static int myfs_open(const char *path, struct fuse_file_info *fi) {
     get_relative_path(path, relpath);
 
     // 미끼 파일 감지
-    if (strcmp(path, honeypot_path) == 0) {
-        terminate_ransomware_process(path); // 미끼 파일 접근 시 해당 프로세스 종료
+    if (strcmp(relpath, honeypot_relpath) == 0) {
+        fprintf(stderr, "[ALERT] Honeypot file read: %s\n", path);
+        fflush(stderr);
+        terminate_ransomware_process(honeypot_path); // 미끼 파일 접근 시 해당 프로세스 종료
     }
 
     int res = openat(base_fd, relpath, fi->flags);
@@ -475,9 +487,14 @@ static int myfs_open(const char *path, struct fuse_file_info *fi) {
 
 static int myfs_read(const char *path, char *buf, size_t size, off_t offset,
                      struct fuse_file_info *fi) {
+    char relpath[PATH_MAX];
+    get_relative_path(path, relpath);
+
     // 미끼 파일 감지
-    if (strcmp(path, honeypot_path) == 0) {
-        terminate_ransomware_process(path); // 미끼 파일 접근 시 해당 프로세스 종료
+    if (strcmp(relpath, honeypot_relpath) == 0) {
+        fprintf(stderr, "[ALERT] Honeypot file read: %s\n", path);
+        fflush(stderr);
+        terminate_ransomware_process(honeypot_path); // 미끼 파일 접근 시 해당 프로세스 종료
     }
 
     int res = pread(fi->fh, buf, size, offset);

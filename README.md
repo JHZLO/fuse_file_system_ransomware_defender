@@ -13,7 +13,7 @@ fuse filesystem을 이용하여 랜섬웨어 탐지하기
 
 ☑️ compile 
 ```bash
-gcc -Wall main.c `pkg-config fuse3 --cflags --libs` -lm -o fuse
+gcc -Wall fuse.c `pkg-config fuse3 --cflags --libs` -lm -o fuse
 ```
 
 ☑️ mount
